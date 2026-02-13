@@ -1,0 +1,21 @@
+{
+  "name": "tv-devops-iac",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "get": "cdktf get",
+    "synth": "cdktf synth",
+    "deploy": "cdktf deploy --auto-approve",
+    "destroy": "cdktf destroy --auto-approve"
+  },
+  "dependencies": {
+    "@cdktf/provider-aws": "^19.0.0",
+    "cdktf": "^0.21.0",
+    "constructs": "^10.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}

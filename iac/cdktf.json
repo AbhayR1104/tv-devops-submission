@@ -1,0 +1,7 @@
+{
+  "language": "typescript",
+  "app": "npx ts-node main.ts",
+  "projectId": "tv-devops-iac",
+  "terraformProviders": ["hashicorp/aws@~> 5.0"],
+  "codeMakerOutput": ".gen"
+}

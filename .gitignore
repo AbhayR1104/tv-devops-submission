@@ -1,0 +1,18 @@
+cd ~/tv-devops-submission
+
+cat > .gitignore << 'EOF'
+node_modules/
+npm-debug.log
+
+cdktf.out/
+.gen/
+.terraform/
+*.tfstate
+*.tfstate.backup
+.crash
+
+
+.env
+
+.DS_Store
+EOF
