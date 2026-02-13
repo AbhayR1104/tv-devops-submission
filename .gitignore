@@ -16,3 +16,18 @@
 **/.DS_Store
 
 **/node_modules/
+
+# --- iac build/state artifacts ---
+iac/node_modules/
+iac/.gen/
+iac/cdktf.out/
+iac/.terraform/
+iac/.terraform.lock.hcl
+iac/terraform.*.tfstate
+iac/terraform.*.tfstate.backup
+iac/terraform.tfstate*
+iac/terraform.tfstate*.backup
+
+# --- app artifacts ---
+app/node_modules/
+app/dist/

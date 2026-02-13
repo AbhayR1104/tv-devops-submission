@@ -1,4 +1,4 @@
-import { App, TerraformOutput, TerraformStack } from "cdktf";
+import { App, TerraformOutput, TerraformStack, S3Backend } from "cdktf";
 import { Construct } from "constructs";
 import { AwsProvider } from "@cdktf/provider-aws/lib/provider";
 import { EcrRepository } from "@cdktf/provider-aws/lib/ecr-repository";
@@ -22,6 +22,11 @@ import { IamRolePolicyAttachment } from "@cdktf/provider-aws/lib/iam-role-policy
 import { EcsTaskDefinition } from "@cdktf/provider-aws/lib/ecs-task-definition";
 import { EcsService } from "@cdktf/provider-aws/lib/ecs-service";
 
+import { CloudwatchMetricAlarm } from "@cdktf/provider-aws/lib/cloudwatch-metric-alarm";
+import { SnsTopic } from "@cdktf/provider-aws/lib/sns-topic";
+import { SnsTopicSubscription } from "@cdktf/provider-aws/lib/sns-topic-subscription";
+
+
 class Stack extends TerraformStack {
   constructor(scope: Construct, id: string) {
     super(scope, id);
@@ -37,7 +42,32 @@ class Stack extends TerraformStack {
 
     const containerPort = Number(process.env.CONTAINER_PORT || "3000");
 
-    new AwsProvider(this, "aws", { region });
+    const profile = process.env.AWS_PROFILE;
+    new AwsProvider(this, "aws", {
+      region,
+      ...(profile ? { profile } : {}),
+    });
+
+    // ---------- Remote backend (BONUS) ----------
+    // Default is local, enable remote backend only.
+    const backend = process.env.TF_BACKEND || "local";
+    if (backend === "remote") {
+      const bucket = process.env.TF_STATE_BUCKET;
+      const table = process.env.TF_LOCK_TABLE;
+
+      if (!bucket || !table) {
+        throw new Error("TF_BACKEND=remote requires TF_STATE_BUCKET and TF_LOCK_TABLE");
+      }
+
+      new S3Backend(this, {
+        bucket,
+        dynamodbTable: table,
+        region,
+        encrypt: true,
+        key: `${project}/${env}/terraform.tfstate`,
+      });
+    }
+
 
     // ---------- ECR (already created, but safe to keep in stack) ----------
     const repoName = `${project}-${env}`;
@@ -173,6 +203,43 @@ class Stack extends TerraformStack {
         },
       ],
     });
+    
+    // ---------- CloudWatch alarms (BONUS) ----------
+    const enableAlerts = process.env.ENABLE_ALERTS === "true";
+    if (enableAlerts) {
+      const topic = new SnsTopic(this, "alertsTopic", {
+        name: `${project}-${env}-alerts`,
+      });
+
+      const alertEmail = process.env.ALERT_EMAIL;
+      if (alertEmail) {
+        new SnsTopicSubscription(this, "alertsEmailSub", {
+          topicArn: topic.arn,
+          protocol: "email",
+          endpoint: alertEmail,
+        });
+      }
+
+      // Alarm when ALB target group has unhealthy targets
+      new CloudwatchMetricAlarm(this, "unhealthyTargetsAlarm", {
+        alarmName: `${project}-${env}-unhealthy-targets`,
+        alarmDescription: "ALB target group has unhealthy targets",
+        namespace: "AWS/ApplicationELB",
+        metricName: "UnHealthyHostCount",
+        statistic: "Average",
+        period: 60,
+        evaluationPeriods: 1,
+        threshold: 1,
+        comparisonOperator: "GreaterThanOrEqualToThreshold",
+        dimensions: {
+          LoadBalancer: alb.arnSuffix,
+          TargetGroup: tg.arnSuffix,
+        },
+        alarmActions: [topic.arn],
+        okActions: [topic.arn],
+      });
+    }
+
 
     // ---------- ECS ----------
     const cluster = new EcsCluster(this, "cluster", {
@@ -271,5 +338,6 @@ class Stack extends TerraformStack {
 }
 
 const app = new App();
-new Stack(app, "tv-devops");
+new Stack(app, `tv-devops-${process.env.ENVIRONMENT || "dev"}`);
 app.synth();
+
