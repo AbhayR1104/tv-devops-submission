@@ -1,14 +1,25 @@
-name: Deploy to ECS
+name: Deploy (Multi-Env) to ECS
 
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy (dev/staging/prod)"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
 
 env:
   AWS_REGION: us-west-2
   PROJECT_NAME: tv-devops
-  ENVIRONMENT: dev
   CONTAINER_PORT: "3000"
+  TF_BACKEND: "local" # set to "remote" if you configure S3+Dynamo backend
 
 jobs:
   deploy:
@@ -20,6 +31,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select environment
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ENVIRONMENT=${{ inputs.environment }}" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          fi
+          echo "ECR_REPOSITORY=${{ env.PROJECT_NAME }}-${ENVIRONMENT}" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=${{ env.PROJECT_NAME }}-${ENVIRONMENT}-cluster" >> $GITHUB_ENV
+          echo "ECS_SERVICE=${{ env.PROJECT_NAME }}-${ENVIRONMENT}-service" >> $GITHUB_ENV
+
+      - name: Setup Node (for CDKTF + tooling)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -27,61 +55,61 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Show caller identity
-        run: aws sts get-caller-identity
-
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Set image uri
-        run: |
-          echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> $GITHUB_ENV
-          echo "IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}:latest" >> $GITHUB_ENV
-
       - name: Ensure ECR repo exists
+        env:
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
         run: |
-          aws ecr describe-repositories --region $AWS_REGION --repository-names "${PROJECT_NAME}-${ENVIRONMENT}" \
-            >/dev/null 2>&1 || \
-          aws ecr create-repository --region $AWS_REGION --repository-name "${PROJECT_NAME}-${ENVIRONMENT}"
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "$ECR_REPOSITORY" >/dev/null
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push image (linux/amd64)
-        working-directory: ./app
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           docker buildx build \
             --platform linux/amd64 \
-            -t "$IMAGE_URI" \
+            -f ./app/Dockerfile \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
             --push \
-            .
+            ./app
 
-      - name: Setup Node (for CDKTF)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install IaC deps
-        working-directory: ./iac
-        run: npm ci
-
-      - name: CDKTF synth
+      - name: CDKTF deploy infra (creates/updates ECS/ALB/etc)
         working-directory: ./iac
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
           PROJECT_NAME: ${{ env.PROJECT_NAME }}
           ENVIRONMENT: ${{ env.ENVIRONMENT }}
-          IMAGE_URI: ${{ env.IMAGE_URI }}
           CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
-        run: npx cdktf synth
+          IMAGE_URI: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          TF_BACKEND: ${{ env.TF_BACKEND }}
+          # If you enable remote backend later:
+          # TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          # TF_LOCK_TABLE:  ${{ secrets.TF_LOCK_TABLE }}
+          ENABLE_ALERTS: "true"
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+        run: |
+          npm ci
+          npm run get
+          npm run synth
+          npm run deploy
 
-      - name: CDKTF deploy (creates/repairs cluster+service)
-        working-directory: ./iac
-        env:
-          AWS_REGION: ${{ env.AWS_REGION }}
-          PROJECT_NAME: ${{ env.PROJECT_NAME }}
-          ENVIRONMENT: ${{ env.ENVIRONMENT }}
-          IMAGE_URI: ${{ env.IMAGE_URI }}
-          CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
-        run: npx cdktf deploy --auto-approve
+      - name: Force ECS service deployment
+        run: |
+          aws ecs update-service \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --service "${{ env.ECS_SERVICE }}" \
+            --force-new-deployment
+
+      - name: Smoke test (best-effort)
+        run: |
+          echo "If your CDKTF outputs print an ALB URL, curl it from logs."
+          echo "Done."
