@@ -1,25 +1,18 @@
-name: Deploy (Multi-Env) to ECS
+name: Deploy App (ECR -> ECS)
 
 on:
   push:
     branches: ["main"]
+    paths:
+      - "app/**"
+      - ".github/workflows/**"
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "Environment to deploy (dev/staging/prod)"
-        required: true
-        default: "dev"
-        type: choice
-        options:
-          - dev
-          - staging
-          - prod
 
 env:
   AWS_REGION: us-west-2
-  PROJECT_NAME: tv-devops
-  CONTAINER_PORT: "3000"
-  TF_BACKEND: "local"
+  ECR_REPOSITORY: tv-devops-dev
+  ECS_CLUSTER: tv-devops-dev-cluster
+  ECS_SERVICE: tv-devops-dev-service
 
 jobs:
   deploy:
@@ -31,41 +24,6 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # -------------------------
-      # Select environment safely
-      # -------------------------
-      - name: Select environment
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ENV="${{ inputs.environment }}"
-          else
-            ENV="dev"
-          fi
-
-          ENV=$(echo "$ENV" | tr '[:upper:]' '[:lower:]')
-
-          echo "ENVIRONMENT=$ENV" >> $GITHUB_ENV
-          echo "ECR_REPOSITORY=tv-devops-$ENV" >> $GITHUB_ENV
-          echo "ECS_CLUSTER=tv-devops-$ENV-cluster" >> $GITHUB_ENV
-          echo "ECS_SERVICE=tv-devops-$ENV-service" >> $GITHUB_ENV
-
-      # -------------------------
-      # Setup Node
-      # -------------------------
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.6
-
-
-      # -------------------------
-      # AWS Credentials
-      # -------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -73,31 +31,18 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # -------------------------
-      # ECR login
-      # -------------------------
       - name: Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # -------------------------
-      # Ensure ECR repo exists
-      # -------------------------
       - name: Ensure ECR repository exists
         run: |
-          echo "Using repo: $ECR_REPOSITORY"
-          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
-          aws ecr create-repository --repository-name "$ECR_REPOSITORY"
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}"
 
-      # -------------------------
-      # Setup Docker buildx
-      # -------------------------
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # -------------------------
-      # Build and push image
-      # -------------------------
       - name: Build and push image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -106,40 +51,18 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             -f ./app/Dockerfile \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
             --push \
             ./app
 
-      # -------------------------
-      # Deploy infrastructure (CDKTF)
-      # -------------------------
-      - name: Deploy Infrastructure
-        working-directory: ./iac
-        env:
-          AWS_REGION: ${{ env.AWS_REGION }}
-          PROJECT_NAME: ${{ env.PROJECT_NAME }}
-          ENVIRONMENT: ${{ env.ENVIRONMENT }}
-          CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
-          IMAGE_URI: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
-          TF_BACKEND: ${{ env.TF_BACKEND }}
-          ENABLE_ALERTS: "true"
-          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-        run: |
-          npm install --legacy-peer-deps
-          npx cdktf get
-          npx cdktf synth
-          npx cdktf deploy --auto-approve
-
-      # -------------------------
-      # Force ECS new deployment
-      # -------------------------
-      - name: Force ECS Deployment
+      - name: Force ECS new deployment
         run: |
           aws ecs update-service \
-            --cluster "$ECS_CLUSTER" \
-            --service "$ECS_SERVICE" \
-            --force-new-deployment
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --service "${{ env.ECS_SERVICE }}" \
+            --force-new-deployment \
+            --region "${{ env.AWS_REGION }}"
 
       - name: Done
-        run: echo "Deployment complete 🚀"
+        run: echo "Deployment complete"
