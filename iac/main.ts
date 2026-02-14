@@ -68,15 +68,6 @@ class Stack extends TerraformStack {
       });
     }
 
-
-    // ---------- ECR (already created, but safe to keep in stack) ----------
-    const repoName = `${project}-${env}`;
-    const ecr = new EcrRepository(this, "ecr", {
-      name: repoName,
-      imageTagMutability: "MUTABLE",
-      forceDelete: true,
-    });
-
     // ---------- Networking: VPC + 2 public subnets ----------
     const vpc = new Vpc(this, "vpc", {
       cidrBlock: "10.0.0.0/16",
@@ -325,10 +316,6 @@ class Stack extends TerraformStack {
 
     new TerraformOutput(this, "health_url", {
       value: `http://${alb.dnsName}/health`,
-    });
-
-    new TerraformOutput(this, "ecr_repository_url", {
-      value: ecr.repositoryUrl,
     });
 
     new TerraformOutput(this, "ecs_service_name", {
